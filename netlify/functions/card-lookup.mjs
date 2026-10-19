@@ -1,167 +1,153 @@
 
-const OFFICIAL_SITE = "https://onepiece-cardgame.com";
+const BASE = "https://onepiece-cardgame.com";
 
-function decodeHtml(text) {
+const TYPES = new Set([
+  "CHARACTER", "LEADER", "EVENT", "STAGE"
+]);
+
+const RARITIES = new Set([
+  "C", "UC", "R", "SR", "SEC", "L", "P", "SP", "TR"
+]);
+
+function decodeHTML(text) {
   return String(text || "")
-    .replace(/&nbsp;/gi, " ")
     .replace(/&amp;/gi, "&")
     .replace(/&quot;/gi, '"')
-    .replace(/&#39;|&apos;/gi, "'")
+    .replace(/&nbsp;/gi, " ")
     .replace(/&lt;/gi, "<")
     .replace(/&gt;/gi, ">")
+    .replace(/&#39;|&apos;/gi, "'")
     .replace(/&#(\d+);/g, (_, n) => {
-      const v = Number(n);
-      return v >= 0 && v <= 0x10ffff
-        ? String.fromCodePoint(v) : "";
-    })
-    .replace(/&#x([0-9a-f]+);/gi, (_, n) => {
-      const v = parseInt(n, 16);
-      return v >= 0 && v <= 0x10ffff
-        ? String.fromCodePoint(v) : "";
+      const code = Number(n);
+      return code <= 0x10ffff
+        ? String.fromCodePoint(code)
+        : "";
     });
 }
 
-function getTextLines(html) {
-  return decodeHtml(
+function textLines(html) {
+  return decodeHTML(
     html
       .replace(/<script\b[^>]*>[\s\S]*?<\/script>/gi, "")
       .replace(/<style\b[^>]*>[\s\S]*?<\/style>/gi, "")
       .replace(/<!--[\s\S]*?-->/g, "")
-      .replace(/<[^>]*>/g, "\n")
+      .replace(/<[^>]+>/g, "\n")
   )
     .split(/\r?\n/)
-    .map(x => x.trim())
+    .map(line => line.trim())
     .filter(Boolean);
 }
 
-function isCardName(value, cardId) {
-  if (!value || value === cardId || value.length > 120) {
-    return false;
-  }
+function getCardInfo(html, id) {
+  const lines = textLines(html);
 
-  if (/^(C|UC|R|SR|SEC|L|SP|P)$/i.test(value)) {
-    return false;
-  }
-
-  if (/^(LEADER|CHARACTER|EVENT|STAGE)$/i.test(value)) {
-    return false;
-  }
-
-  if (
-    /^(コスト|属性|パワー|カウンター|色|特徴|テキスト|入手情報|ブロック)/.test(value)
-  ) {
-    return false;
-  }
-
-  if (/検索|SEARCH|条件クリア|件HIT|ボタン/i.test(value)) {
-    return false;
-  }
-
-  return true;
-}
-
-function extractCard(html, cardId) {
-  const lines = getTextLines(html);
-
-  const hitIndex = lines.findIndex(
-    line => /^\d+\s*件\s*HIT$/i.test(line)
+  const hitIndex = lines.findIndex(line =>
+    /^\d+\s*件\s*HIT$/i.test(line)
   );
 
-  if (hitIndex >= 0 && /^0\s*件\s*HIT$/i.test(lines[hitIndex])) {
+  if (
+    hitIndex >= 0 &&
+    /^0\s*件\s*HIT$/i.test(lines[hitIndex])
+  ) {
     return null;
   }
 
-  // Search the result area, not the search input.
   const start = hitIndex >= 0 ? hitIndex + 1 : 0;
 
-  let foundIndex = -1;
-
+  // Find exact card number inside search results.
   for (let i = start; i < lines.length; i++) {
-    if (lines[i] === cardId) {
-      foundIndex = i;
-      break;
+    if (lines[i] !== id) continue;
+
+    // Official result format:
+    // OP16-053 | C | CHARACTER ロロノア・ゾロ
+    const end = Math.min(i + 12, lines.length);
+
+    for (let j = i + 1; j < end; j++) {
+      const type = lines[j].toUpperCase();
+
+      if (!TYPES.has(type)) continue;
+
+      // Name is the first meaningful line after card type.
+      let name = "";
+
+      for (let k = j + 1; k < Math.min(j + 4, end); k++) {
+        const candidate = lines[k];
+
+        if (
+          !candidate ||
+          candidate === "|" ||
+          candidate === "｜" ||
+          candidate.length < 2 ||
+          /検索|テキスト表示|CARD VIEW/i.test(candidate)
+        ) {
+          continue;
+        }
+
+        name = candidate;
+        break;
+      }
+
+      if (!name) continue;
+
+      let rarity = "";
+
+      // Read rarity between the card number and card type.
+      for (let k = i + 1; k < j; k++) {
+        const value = lines[k].toUpperCase();
+
+        if (RARITIES.has(value)) {
+          rarity = value;
+          break;
+        }
+      }
+
+      return {
+        name,
+        rarity,
+        type
+      };
     }
   }
 
-  if (foundIndex < 0) {
-    return null;
-  }
-
-  // The actual card name appears beside the exact card ID.
-  const candidates = [
-    lines[foundIndex + 1],
-    lines[foundIndex - 1]
-  ];
-
-  const name = candidates.find(
-    value => isCardName(value, cardId)
-  );
-
-  if (!name) {
-    return {
-      error: "找到卡号，但未能可靠识别日文名称",
-      nearbyLines: lines.slice(
-        Math.max(0, foundIndex - 5),
-        foundIndex + 7
-      )
-    };
-  }
-
-  // Rarity can be omitted rather than guessed.
-  const previousLines = lines.slice(
-    Math.max(start, foundIndex - 8),
-    foundIndex
-  );
-
-  const validRarities = [
-    "SEC", "SR", "UC", "SP", "R", "C", "L", "P"
-  ];
-
-  const rarity =
-    previousLines.find(x => validRarities.includes(x)) || "";
-
-  return { name, rarity };
+  return null;
 }
 
-function extractImages(html, cardId) {
+function getImages(html, id) {
   const images = [];
   const seen = new Set();
 
-  // Extract only filenames actually present in official HTML.
+  // Use actual image filenames in the official page.
   const pattern = new RegExp(
     "images/cardlist/card/(" +
-      cardId +
-      "(?:_[a-z0-9]+)*\\.(?:png|jpe?g|webp))" +
+      id +
+      "(?:_[a-z0-9]+)*\\.(?:png|jpg|jpeg|webp))" +
       "(?:\\?([^\"'<>\\s]*))?",
     "gi"
   );
 
   for (const match of html.matchAll(pattern)) {
     const filename = match[1];
-    const key = filename.toLowerCase();
 
-    if (seen.has(key)) continue;
-    seen.add(key);
+    if (seen.has(filename.toLowerCase())) continue;
+    seen.add(filename.toLowerCase());
 
     const query = match[2]
-      ? "?" + decodeHtml(match[2])
+      ? "?" + decodeHTML(match[2])
       : "";
 
     const url =
-      OFFICIAL_SITE +
+      BASE +
       "/images/cardlist/card/" +
       filename +
       query;
 
     const parallel = filename.match(/_p(\d+)/i);
 
-    let label = "标准版";
-
-    if (parallel) {
-      label = "平行版 / 异画 p" + parallel[1];
-    } else if (filename.includes("_")) {
-      label = "其他官方印刷版本";
-    }
+    const label = parallel
+      ? "平行版 / 异画 p" + parallel[1]
+      : filename.includes("_")
+        ? "其他官方印刷版本"
+        : "标准版";
 
     images.push({
       url,
@@ -171,9 +157,13 @@ function extractImages(html, cardId) {
     });
   }
 
+  // Standard card before parallel cards.
   images.sort((a, b) => {
-    const aBase = a.filename === cardId + ".png";
-    const bBase = b.filename === cardId + ".png";
+    const aBase = a.filename.toLowerCase() ===
+      (id + ".png").toLowerCase();
+    const bBase = b.filename.toLowerCase() ===
+      (id + ".png").toLowerCase();
+
     return Number(bBase) - Number(aBase);
   });
 
@@ -183,105 +173,94 @@ function extractImages(html, cardId) {
 export default async function handler(request) {
   const params = new URL(request.url).searchParams;
 
-  const cardId = (params.get("id") || "")
+  const id = (params.get("id") || "")
     .trim()
     .toUpperCase();
 
-  if (!/^(?:(?:OP|EB|ST)\d{2}-\d{3}|P-\d{3})$/.test(cardId)) {
+  if (!/^(?:(?:OP|EB|ST)\d{2}-\d{3}|P-\d{3})$/.test(id)) {
     return Response.json(
-      { error: "卡号格式错误，例如 OP16-053" },
+      { error: "卡号格式不正确，例如 OP16-053" },
       { status: 400 }
     );
   }
 
-  const officialUrl = new URL(
-    OFFICIAL_SITE + "/cardlist/"
-  );
-
-  officialUrl.searchParams.set("freewords", cardId);
-  officialUrl.searchParams.set("search", "true");
+  const official = new URL(BASE + "/cardlist/");
+  official.searchParams.set("freewords", id);
+  official.searchParams.set("search", "true");
 
   let html;
 
   try {
-    const response = await fetch(officialUrl, {
+    const response = await fetch(official.toString(), {
       headers: {
-        Accept: "text/html",
-        "User-Agent": "GrandLinePortfolio/0.3"
+        Accept: "text/html"
       },
       signal: AbortSignal.timeout(15000)
     });
 
     if (!response.ok) {
-      return Response.json({
-        error: "官方卡牌网站请求失败",
-        upstreamStatus: response.status
-      }, { status: 502 });
+      throw new Error("HTTP " + response.status);
     }
 
     html = await response.text();
-
   } catch (error) {
     return Response.json({
-      error: "无法连接万代日版卡牌数据库",
+      error: "无法获取万代官方卡表",
       detail: String(error.message || error)
     }, { status: 502 });
   }
 
-  const card = extractCard(html, cardId);
+  const card = getCardInfo(html, id);
 
-  if (!card || card.error) {
+  if (!card) {
+    const lines = textLines(html);
+    const index = lines.findIndex(x => x === id);
+
     return Response.json({
-      error: card?.error ||
-        "官方搜索结果中未找到对应卡牌",
-      cardId,
-      officialUrl: officialUrl.toString(),
-      ...(params.get("debug") === "1"
-        ? {
-            debug: {
-              htmlLength: html.length,
-              containsCardId: html.includes(cardId),
-              nearbyLines: card?.nearbyLines || [],
-              title: html.match(
-                /<title[^>]*>([^<]*)<\/title>/i
-              )?.[1] || null
-            }
-          }
-        : {})
-    }, { status: card?.error ? 502 : 404 });
+      error: "无法可靠解析卡牌资料",
+      cardId: id,
+      ...(params.get("debug") === "1" ? {
+        debug: {
+          htmlLength: html.length,
+          nearbyLines: index >= 0
+            ? lines.slice(
+                Math.max(0, index - 3),
+                index + 12
+              )
+            : []
+        }
+      } : {})
+    }, { status: 404 });
   }
 
-  const images = extractImages(html, cardId);
+  const images = getImages(html, id);
 
-  const variants = images.map((item, index) => ({
+  const variants = images.map((image, index) => ({
     id: index,
-    label: item.label,
-    url: item.url,
-    imageUrl: item.url,
-    image: item.url
+    label: image.label,
+    url: image.url,
+    imageUrl: image.url,
+    image: image.url
   }));
 
   return Response.json({
-    cardId,
+    cardId: id,
     name: card.name,
     rarity: card.rarity,
-
+    type: card.type,
     imageUrl: images[0]?.url || null,
     image: images[0]?.url || null,
-
     images,
     variants,
-
-    officialUrl: officialUrl.toString(),
-    source: "ONE PIECE CARD GAME Japanese Official",
+    officialUrl: official.toString(),
     language: "ja",
-
+    source: "ONE PIECE CARD GAME Japanese Official",
     warning: images.length === 0
-      ? "卡牌名称已识别，但未找到官方图片地址"
+      ? "找到了卡名，但未提取到官方图片"
       : null
   }, {
     headers: {
-      "Cache-Control": "public, max-age=1800"
+      "Cache-Control": "no-store"
     }
   });
 }
