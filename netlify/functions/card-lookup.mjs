@@ -55,12 +55,31 @@ export default async (request) => {
     }
   }
 
-  if (found < 0) {
-    return Response.json(
-      { error: "官方搜索结果中未找到对应卡牌" },
-      { status: 404 }
-    );
+  
+if (found < 0) {
+  const index = lines.findIndex(x => x.includes(id));
+
+  if (new URL(request.url).searchParams.get("debug") === "1") {
+    return Response.json({
+      requestedId: id,
+      officialUrl: official.toString(),
+      htmlLength: html.length,
+      containsCardId: html.includes(id),
+      pageTitle: html.match(/<title[^>]*>([^<]*)<\/title>/i)?.[1] || null,
+      hitCountText: html.match(/\d+\s*件\s*HIT/)?.[0] || null,
+      nearbyLines: index >= 0
+        ? lines.slice(Math.max(0, index - 3), index + 8)
+        : [],
+      firstLines: lines.slice(0, 15)
+    });
   }
+
+  return Response.json(
+    { error: "官方搜索结果中未找到对应卡牌" },
+    { status: 404 }
+  );
+}
+
 
   const name = lines[found + 1] || "";
 
